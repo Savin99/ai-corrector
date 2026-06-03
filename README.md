@@ -80,6 +80,12 @@ echo "текст" | AI_CORRECTOR_MODEL=qwen3.5:4b-q4_K_M ./corrector.py
 python3 -m py_compile corrector.py
 ```
 
+Unit-тесты локальных защит:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 Пустой ввод должен вернуть ошибку:
 
 ```bash

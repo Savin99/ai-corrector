@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import socket
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -20,16 +22,21 @@ SYSTEM_PROMPT = """Ты — аккуратный корректор русско
 
 Твоя задача:
 - исправить орфографию, пунктуацию и грамматику;
+- делать минимально возможные правки;
 - сохранить смысл, тон, стиль автора и степень неформальности;
 - не делать текст более официальным без причины;
 - сохранять исходные словоформы, если они грамматически допустимы;
 - не менять род, число, падеж, время, вид, залог, приставки и суффиксы без явной ошибки;
+- не переставлять слова, не сокращать фразы, не заменять слова синонимами;
+- не менять «ё» на «е»;
 - не добавлять новые факты;
 - не удалять и не менять имена, ссылки, названия сервисов, цифры, команды и технические термины;
 - не объяснять правки.
 
 Если текст уже корректен, верни его без изменений.
 Например: «Заархивированную» нельзя заменять на «Архивированный».
+Например: «Не забудь» нельзя заменять на «Не забудьте».
+Например: «В 3-м квартале» нельзя заменять на «В третьем квартале».
 
 Верни только исправленный текст."""
 
@@ -40,6 +47,16 @@ QUICK_PHRASE_FIXES = {
 }
 
 SINGLE_RUSSIAN_WORD_RE = re.compile(r"^\s*[А-Яа-яЁё]+[.!?…,:;]*\s*$")
+RUSSIAN_WORD_RE = re.compile(r"[А-Яа-яЁё]+")
+PROTECTED_TOKEN_RE = re.compile(r"https?://\S+|(?<!\S)\S*[A-Za-z0-9_]\S*(?!\S)")
+PROTECTED_TOKEN_EDGE_CHARS = "`'\".,;:!?…)]}>"
+LOCAL_TEXT_FIXES = (
+    (re.compile(r"\bприйду\b", re.IGNORECASE), "приду"),
+    (re.compile(r"\bкоментариями\b", re.IGNORECASE), "комментариями"),
+    (re.compile(r"\bвообщем\b", re.IGNORECASE), "в общем"),
+    (re.compile(r"\bихний\b", re.IGNORECASE), "их"),
+    (re.compile(r"\bболее\s+лучше\b", re.IGNORECASE), "лучше"),
+)
 
 
 def strip_noise(text: str) -> str:
@@ -78,6 +95,13 @@ def match_case(source: str, replacement: str) -> str:
     return replacement
 
 
+def match_first_letter_case(source: str, replacement: str) -> str:
+    if source[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+
+    return replacement
+
+
 def quick_fix(source_text: str) -> str | None:
     stripped = source_text.strip()
     match = re.fullmatch(r"(.+?)([.!?…]*)", stripped)
@@ -95,11 +119,160 @@ def quick_fix(source_text: str) -> str | None:
     return match_case(core, replacement) + punctuation
 
 
+def local_text_fix(source_text: str) -> str | None:
+    fixed = source_text
+
+    for pattern, replacement in LOCAL_TEXT_FIXES:
+        fixed = pattern.sub(
+            lambda match: match_first_letter_case(match.group(0), replacement),
+            fixed,
+        )
+
+    if fixed == source_text:
+        return None
+
+    return fixed
+
+
 def single_word_passthrough(source_text: str) -> str | None:
     if SINGLE_RUSSIAN_WORD_RE.fullmatch(source_text):
         return source_text
 
     return None
+
+
+def protected_tokens(text: str) -> set[str]:
+    tokens = set()
+
+    for match in PROTECTED_TOKEN_RE.finditer(text):
+        token = match.group(0).strip(PROTECTED_TOKEN_EDGE_CHARS)
+        if token:
+            tokens.add(token)
+
+    return tokens
+
+
+def russian_words(text: str) -> list[str]:
+    return RUSSIAN_WORD_RE.findall(text.casefold())
+
+
+def bounded_edit_distance(left: str, right: str, limit: int = 4) -> int:
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+
+    previous = list(range(len(right) + 1))
+
+    for left_index, left_char in enumerate(left, 1):
+        current = [left_index]
+        row_min = current[0]
+
+        for right_index, right_char in enumerate(right, 1):
+            insert_cost = current[right_index - 1] + 1
+            delete_cost = previous[right_index] + 1
+            replace_cost = previous[right_index - 1] + (left_char != right_char)
+            value = min(insert_cost, delete_cost, replace_cost)
+            current.append(value)
+            row_min = min(row_min, value)
+
+        if row_min > limit:
+            return limit + 1
+
+        previous = current
+
+    return previous[-1]
+
+
+def has_suspicious_new_russian_words(source_text: str, corrected_text: str) -> bool:
+    source_words = russian_words(source_text)
+    source_word_set = set(source_words)
+
+    if not source_words:
+        return False
+
+    for word in russian_words(corrected_text):
+        if len(word) < 5:
+            continue
+
+        if word in source_word_set:
+            continue
+
+        if word.endswith(("ся", "сь")) and word[:-2] in source_word_set:
+            return True
+
+        closest_distance = min(
+            bounded_edit_distance(word, source_word) for source_word in source_words
+        )
+
+        if closest_distance <= 2:
+            if any(
+                word.startswith(source_word) and len(word) - len(source_word) >= 2
+                for source_word in source_words
+            ):
+                return True
+
+            continue
+
+        if any(
+            difflib.SequenceMatcher(None, word, source_word).ratio() >= 0.74
+            for source_word in source_words
+        ):
+            return True
+
+        return True
+
+    return False
+
+
+def has_added_combining_marks(source_text: str, corrected_text: str) -> bool:
+    source_has_marks = any(unicodedata.combining(char) for char in source_text)
+
+    if source_has_marks:
+        return False
+
+    return any(unicodedata.combining(char) for char in corrected_text)
+
+
+def correction_is_safe(source_text: str, corrected_text: str) -> bool:
+    source = source_text.strip()
+    corrected = corrected_text.strip()
+
+    if not corrected:
+        return False
+
+    if "`" not in source and "`" in corrected:
+        return False
+
+    if has_added_combining_marks(source, corrected):
+        return False
+
+    for token in protected_tokens(source):
+        if token not in corrected:
+            return False
+
+    for word in RUSSIAN_WORD_RE.findall(source):
+        if "ё" in word.casefold() and word not in corrected_text:
+            return False
+
+    source_norm = re.sub(r"\s+", " ", source.casefold())
+    corrected_norm = re.sub(r"\s+", " ", corrected.casefold())
+
+    if len(source_norm) >= 20:
+        ratio = difflib.SequenceMatcher(None, source_norm, corrected_norm).ratio()
+        if ratio < 0.68:
+            return False
+
+    source_word_count = len(russian_words(source))
+    corrected_word_count = len(russian_words(corrected))
+
+    if source_word_count >= 4:
+        max_delta = max(3, round(source_word_count * 0.4))
+        if abs(source_word_count - corrected_word_count) > max_delta:
+            return False
+
+    if has_suspicious_new_russian_words(source, corrected):
+        return False
+
+    return True
 
 
 def build_payload(source_text: str, model: str, num_ctx: int, num_predict: int) -> dict:
@@ -130,7 +303,7 @@ def build_payload(source_text: str, model: str, num_ctx: int, num_predict: int) 
             },
         ],
         "options": {
-            "temperature": 0.1,
+            "temperature": 0,
             "top_p": 0.9,
             "num_ctx": num_ctx,
             "num_predict": num_predict,
@@ -246,6 +419,11 @@ def main() -> int:
         print(fixed, end="")
         return 0
 
+    fixed = local_text_fix(source_text)
+    if fixed is not None:
+        print(fixed, end="")
+        return 0
+
     try:
         corrected = call_ollama(
             source_text,
@@ -258,6 +436,9 @@ def main() -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    if not correction_is_safe(source_text, corrected):
+        corrected = source_text
 
     print(corrected, end="")
     return 0
