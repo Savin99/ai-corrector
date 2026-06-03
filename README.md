@@ -5,10 +5,10 @@
 MVP использует одну модель по умолчанию:
 
 ```text
-qwen3.5:4b-q4_K_M
+gemma3:4b
 ```
 
-Это стартовый вариант для MacBook Air M3 с 8 GB unified memory.
+Это практичный вариант для MacBook Air M3 с 8 GB unified memory: модель весит около 3.3 GB и лучше отработала на русских тестовых фразах.
 
 ## Установка
 
@@ -24,7 +24,7 @@ qwen3.5:4b-q4_K_M
 - скопирует `corrector.py` в `~/ai-corrector/corrector.py`;
 - добавит Hammerspoon loader в `~/.hammerspoon/init.lua`;
 - установит Hammerspoon-скрипт в `~/.hammerspoon/ai-corrector.lua`;
-- скачает модель `qwen3.5:4b-q4_K_M`.
+- скачает модель `gemma3:4b`.
 
 После установки включи права для Hammerspoon:
 

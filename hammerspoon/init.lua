@@ -6,7 +6,7 @@
 local defaultConfig = {
   pythonPath = "/usr/bin/env",
   scriptPath = os.getenv("HOME") .. "/ai-corrector/corrector.py",
-  model = os.getenv("AI_CORRECTOR_MODEL") or "qwen3.5:4b-q4_K_M",
+  model = os.getenv("AI_CORRECTOR_MODEL") or "gemma3:4b",
   timeout = "120",
 }
 

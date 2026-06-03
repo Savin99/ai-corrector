@@ -73,6 +73,21 @@ class CorrectorSafetyTest(unittest.TestCase):
             )
         )
 
+    def test_rejects_colloquial_style_loss(self):
+        source = "Слушай ну я походу не туда нажал и оно все сломалось"
+        self.assertFalse(
+            corrector.correction_is_safe(
+                source,
+                "Слушай, ну, похоже, не туда нажал, и оно всё сломалось.",
+            )
+        )
+        self.assertTrue(
+            corrector.correction_is_safe(
+                source,
+                "Слушай, ну я походу не туда нажал, и оно всё сломалось.",
+            )
+        )
+
     def test_rejects_added_combining_marks(self):
         self.assertFalse(
             corrector.correction_is_safe(

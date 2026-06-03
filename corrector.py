@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 
-DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
+DEFAULT_MODEL = "gemma3:4b"
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
 
 SYSTEM_PROMPT = """Ты — аккуратный корректор русского текста.
@@ -55,6 +55,33 @@ LEXICAL_TOKEN_RE = re.compile(
 PROTECTED_TOKEN_RE = re.compile(r"https?://\S+|(?<!\S)\S*[A-Za-z0-9_]\S*(?!\S)")
 PROTECTED_TOKEN_EDGE_CHARS = "`'\".,;:!?…)]}>"
 CYRILLIC_ABBREVIATION_RE = re.compile(r"[А-ЯЁ]{2,}")
+STYLE_PRESERVED_WORDS = {
+    "блин",
+    "вообще",
+    "вроде",
+    "короче",
+    "меня",
+    "мне",
+    "мной",
+    "мы",
+    "нам",
+    "нас",
+    "нами",
+    "ну",
+    "она",
+    "они",
+    "оно",
+    "он",
+    "походу",
+    "слушай",
+    "таки",
+    "тебе",
+    "тебя",
+    "типа",
+    "тобой",
+    "ты",
+    "я",
+}
 LOCAL_TEXT_FIXES = (
     (re.compile(r"\bприйду\b", re.IGNORECASE), "приду"),
     (re.compile(r"\bкоментариями\b", re.IGNORECASE), "комментариями"),
@@ -335,6 +362,16 @@ def has_added_combining_marks(source_text: str, corrected_text: str) -> bool:
     return any(unicodedata.combining(char) for char in corrected_text)
 
 
+def style_words_are_preserved(source_text: str, corrected_text: str) -> bool:
+    corrected_word_set = set(russian_words(corrected_text))
+
+    for word in russian_words(source_text):
+        if word in STYLE_PRESERVED_WORDS and word not in corrected_word_set:
+            return False
+
+    return True
+
+
 def correction_is_safe(source_text: str, corrected_text: str) -> bool:
     source = source_text.strip()
     corrected = corrected_text.strip()
@@ -349,6 +386,9 @@ def correction_is_safe(source_text: str, corrected_text: str) -> bool:
         return False
 
     if not protected_context_is_preserved(source, corrected):
+        return False
+
+    if not style_words_are_preserved(source, corrected):
         return False
 
     for token in protected_tokens(source):
