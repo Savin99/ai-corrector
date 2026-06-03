@@ -58,6 +58,21 @@ class CorrectorSafetyTest(unittest.TestCase):
             )
         )
 
+    def test_rejects_cyrillic_abbreviation_reordering(self):
+        source = "то есть ты уже не через ИИ правил а через скрипт типа?"
+        self.assertFalse(
+            corrector.correction_is_safe(
+                source,
+                "То есть ты уже не через правила ИИ, а через скрипт типа?",
+            )
+        )
+        self.assertTrue(
+            corrector.correction_is_safe(
+                source,
+                "То есть ты уже не через ИИ правил, а через скрипт, типа?",
+            )
+        )
+
     def test_rejects_added_combining_marks(self):
         self.assertFalse(
             corrector.correction_is_safe(

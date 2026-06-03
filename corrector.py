@@ -37,6 +37,7 @@ SYSTEM_PROMPT = """Ты — аккуратный корректор русско
 Например: «Заархивированную» нельзя заменять на «Архивированный».
 Например: «Не забудь» нельзя заменять на «Не забудьте».
 Например: «В 3-м квартале» нельзя заменять на «В третьем квартале».
+Например: «через ИИ правил» нельзя заменять на «через правила ИИ».
 
 Верни только исправленный текст."""
 
@@ -48,8 +49,12 @@ QUICK_PHRASE_FIXES = {
 
 SINGLE_RUSSIAN_WORD_RE = re.compile(r"^\s*[А-Яа-яЁё]+[.!?…,:;]*\s*$")
 RUSSIAN_WORD_RE = re.compile(r"[А-Яа-яЁё]+")
+LEXICAL_TOKEN_RE = re.compile(
+    r"https?://\S+|[A-Za-zА-Яа-яЁё0-9_]+(?:[-_/][A-Za-zА-Яа-яЁё0-9_]+)*"
+)
 PROTECTED_TOKEN_RE = re.compile(r"https?://\S+|(?<!\S)\S*[A-Za-z0-9_]\S*(?!\S)")
 PROTECTED_TOKEN_EDGE_CHARS = "`'\".,;:!?…)]}>"
+CYRILLIC_ABBREVIATION_RE = re.compile(r"[А-ЯЁ]{2,}")
 LOCAL_TEXT_FIXES = (
     (re.compile(r"\bприйду\b", re.IGNORECASE), "приду"),
     (re.compile(r"\bкоментариями\b", re.IGNORECASE), "комментариями"),
@@ -149,7 +154,105 @@ def protected_tokens(text: str) -> set[str]:
         if token:
             tokens.add(token)
 
+    for token in lexical_tokens(text):
+        if CYRILLIC_ABBREVIATION_RE.fullmatch(token):
+            tokens.add(token)
+
     return tokens
+
+
+def lexical_tokens(text: str) -> list[str]:
+    return [
+        match.group(0).strip(PROTECTED_TOKEN_EDGE_CHARS)
+        for match in LEXICAL_TOKEN_RE.finditer(text)
+    ]
+
+
+def normalize_token(token: str) -> str:
+    return token.strip(PROTECTED_TOKEN_EDGE_CHARS).casefold()
+
+
+def is_protected_context_token(token: str) -> bool:
+    normalized = token.strip(PROTECTED_TOKEN_EDGE_CHARS)
+
+    if not normalized:
+        return False
+
+    return (
+        normalized.startswith(("http://", "https://"))
+        or bool(re.search(r"[A-Za-z0-9_]", normalized))
+        or bool(CYRILLIC_ABBREVIATION_RE.fullmatch(normalized))
+    )
+
+
+def neighbor_matches(source_neighbor: str | None, corrected_neighbor: str | None) -> bool:
+    if source_neighbor is None:
+        return corrected_neighbor is None
+
+    if corrected_neighbor is None:
+        return False
+
+    source_normalized = normalize_token(source_neighbor)
+    corrected_normalized = normalize_token(corrected_neighbor)
+
+    if source_normalized == corrected_normalized:
+        return True
+
+    if len(source_normalized) >= 5 and len(corrected_normalized) >= 5:
+        return bounded_edit_distance(source_normalized, corrected_normalized, 2) <= 2
+
+    return False
+
+
+def protected_context_is_preserved(source_text: str, corrected_text: str) -> bool:
+    source_tokens = lexical_tokens(source_text)
+    corrected_tokens = lexical_tokens(corrected_text)
+
+    if not source_tokens:
+        return True
+
+    corrected_indexes_by_token: dict[str, list[int]] = {}
+    for index, token in enumerate(corrected_tokens):
+        corrected_indexes_by_token.setdefault(token, []).append(index)
+
+    for source_index, source_token in enumerate(source_tokens):
+        if not is_protected_context_token(source_token):
+            continue
+
+        corrected_indexes = corrected_indexes_by_token.get(source_token, [])
+        if not corrected_indexes:
+            return False
+
+        source_previous = source_tokens[source_index - 1] if source_index > 0 else None
+        source_next = (
+            source_tokens[source_index + 1]
+            if source_index + 1 < len(source_tokens)
+            else None
+        )
+
+        has_matching_context = False
+        for corrected_index in corrected_indexes:
+            corrected_previous = (
+                corrected_tokens[corrected_index - 1] if corrected_index > 0 else None
+            )
+            corrected_next = (
+                corrected_tokens[corrected_index + 1]
+                if corrected_index + 1 < len(corrected_tokens)
+                else None
+            )
+            context_checks = [
+                neighbor_matches(source_previous, corrected_previous),
+                neighbor_matches(source_next, corrected_next),
+            ]
+
+            if any(context_checks):
+                has_matching_context = True
+                break
+
+        if not has_matching_context:
+            return False
+
+    return True
 
 
 def russian_words(text: str) -> list[str]:
@@ -243,6 +346,9 @@ def correction_is_safe(source_text: str, corrected_text: str) -> bool:
         return False
 
     if has_added_combining_marks(source, corrected):
+        return False
+
+    if not protected_context_is_preserved(source, corrected):
         return False
 
     for token in protected_tokens(source):
