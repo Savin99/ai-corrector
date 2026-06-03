@@ -22,9 +22,14 @@ SYSTEM_PROMPT = """Ты — аккуратный корректор русско
 - исправить орфографию, пунктуацию и грамматику;
 - сохранить смысл, тон, стиль автора и степень неформальности;
 - не делать текст более официальным без причины;
+- сохранять исходные словоформы, если они грамматически допустимы;
+- не менять род, число, падеж, время, вид, залог, приставки и суффиксы без явной ошибки;
 - не добавлять новые факты;
 - не удалять и не менять имена, ссылки, названия сервисов, цифры, команды и технические термины;
 - не объяснять правки.
+
+Если текст уже корректен, верни его без изменений.
+Например: «Заархивированную» нельзя заменять на «Архивированный».
 
 Верни только исправленный текст."""
 
@@ -33,6 +38,8 @@ QUICK_PHRASE_FIXES = {
     "не зач то": "не за что",
     "не зачто": "не за что",
 }
+
+SINGLE_RUSSIAN_WORD_RE = re.compile(r"^\s*[А-Яа-яЁё]+[.!?…,:;]*\s*$")
 
 
 def strip_noise(text: str) -> str:
@@ -86,6 +93,13 @@ def quick_fix(source_text: str) -> str | None:
         return None
 
     return match_case(core, replacement) + punctuation
+
+
+def single_word_passthrough(source_text: str) -> str | None:
+    if SINGLE_RUSSIAN_WORD_RE.fullmatch(source_text):
+        return source_text
+
+    return None
 
 
 def build_payload(source_text: str, model: str, num_ctx: int, num_predict: int) -> dict:
@@ -223,6 +237,11 @@ def main() -> int:
         return 1
 
     fixed = quick_fix(source_text)
+    if fixed is not None:
+        print(fixed, end="")
+        return 0
+
+    fixed = single_word_passthrough(source_text)
     if fixed is not None:
         print(fixed, end="")
         return 0
