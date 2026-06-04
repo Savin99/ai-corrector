@@ -9,6 +9,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -17,6 +18,8 @@ import urllib.request
 
 DEFAULT_MODEL = "gemma3:4b"
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
+DEFAULT_THINK = "auto"
+DEFAULT_REVIEW = True
 
 SYSTEM_PROMPT = """Ты — аккуратный корректор русского текста.
 
@@ -40,6 +43,18 @@ SYSTEM_PROMPT = """Ты — аккуратный корректор русско
 Например: «через ИИ правил» нельзя заменять на «через правила ИИ».
 
 Верни только исправленный текст."""
+
+REVIEW_PROMPT = """Ты — строгий финальный проверяющий русского корректора.
+
+Сравни исходный текст и предложенное исправление.
+
+Правила:
+- если исправление меняет смысл, стиль, неформальность, местоимения, термины, URL, цифры или порядок важных слов — верни исходный текст;
+- если исправление только исправляет орфографию, пунктуацию и грамматику — верни исправление;
+- если можно сделать ещё одну очевидную минимальную правку без изменения смысла — сделай её;
+- не объясняй решение.
+
+Верни только финальный текст."""
 
 QUICK_PHRASE_FIXES = {
     "незачто": "не за что",
@@ -130,6 +145,34 @@ def extract_text(content: str) -> str:
         return strip_noise(parsed["text"])
 
     return cleaned
+
+
+def parse_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+
+    normalized = value.strip().casefold()
+    if normalized in {"1", "true", "yes", "y", "on", "да"}:
+        return True
+
+    if normalized in {"0", "false", "no", "n", "off", "нет"}:
+        return False
+
+    return default
+
+
+def normalize_think_setting(value: str | None) -> str:
+    if value is None:
+        return DEFAULT_THINK
+
+    normalized = value.strip().casefold()
+    if normalized in {"auto", "авто"}:
+        return "auto"
+
+    if parse_bool(normalized, False):
+        return "on"
+
+    return "off"
 
 
 def match_case(source: str, replacement: str) -> str:
@@ -436,11 +479,45 @@ def correction_is_safe(source_text: str, corrected_text: str) -> bool:
     return True
 
 
-def build_payload(source_text: str, model: str, num_ctx: int, num_predict: int) -> dict:
-    return {
+def model_supports_thinking(model: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ollama", "show", model],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    return any(line.strip() == "thinking" for line in result.stdout.splitlines())
+
+
+def resolve_think(model: str, think_setting: str) -> bool:
+    if think_setting == "on":
+        return True
+
+    if think_setting == "off":
+        return False
+
+    return model_supports_thinking(model)
+
+
+def build_payload(
+    source_text: str,
+    model: str,
+    num_ctx: int,
+    num_predict: int,
+    *,
+    think: bool,
+) -> dict:
+    payload = {
         "model": model,
         "stream": False,
-        "think": False,
         "keep_alive": "10m",
         "format": {
             "type": "object",
@@ -471,17 +548,62 @@ def build_payload(source_text: str, model: str, num_ctx: int, num_predict: int) 
         },
     }
 
+    if think:
+        payload["think"] = True
 
-def call_ollama(
+    return payload
+
+
+def build_review_payload(
     source_text: str,
-    *,
+    candidate_text: str,
     model: str,
-    url: str,
-    timeout: float,
     num_ctx: int,
     num_predict: int,
-) -> str:
-    payload = build_payload(source_text, model, num_ctx, num_predict)
+    *,
+    think: bool,
+) -> dict:
+    payload = {
+        "model": model,
+        "stream": False,
+        "keep_alive": "10m",
+        "format": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+        "messages": [
+            {"role": "system", "content": REVIEW_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "<source>\n"
+                    f"{source_text}\n"
+                    "</source>\n\n"
+                    "<candidate>\n"
+                    f"{candidate_text}\n"
+                    "</candidate>"
+                ),
+            },
+        ],
+        "options": {
+            "temperature": 0,
+            "top_p": 0.9,
+            "num_ctx": num_ctx,
+            "num_predict": num_predict,
+        },
+    }
+
+    if think:
+        payload["think"] = True
+
+    return payload
+
+
+def send_ollama_payload(payload: dict, url: str, timeout: float) -> dict:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -489,14 +611,23 @@ def call_ollama(
         method="POST",
     )
 
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def run_ollama_payload(payload: dict, url: str, timeout: float) -> str:
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
+        response_data = send_ollama_payload(payload, url, timeout)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace").strip()
-        if detail:
+        if payload.get("think") and "does not support thinking" in detail:
+            payload = dict(payload)
+            payload.pop("think", None)
+            response_data = send_ollama_payload(payload, url, timeout)
+        elif detail:
             raise RuntimeError(f"Ollama вернул ошибку: {detail}") from exc
-        raise RuntimeError(f"Ollama вернул HTTP {exc.code}.") from exc
+        else:
+            raise RuntimeError(f"Ollama вернул HTTP {exc.code}.") from exc
     except (urllib.error.URLError, socket.timeout) as exc:
         raise RuntimeError(
             "Не получилось подключиться к Ollama. "
@@ -512,6 +643,48 @@ def call_ollama(
         raise RuntimeError("Модель вернула пустой ответ.")
 
     return result
+
+
+def call_ollama(
+    source_text: str,
+    *,
+    model: str,
+    url: str,
+    timeout: float,
+    num_ctx: int,
+    num_predict: int,
+    think: bool,
+) -> str:
+    payload = build_payload(
+        source_text,
+        model,
+        num_ctx,
+        num_predict,
+        think=think,
+    )
+    return run_ollama_payload(payload, url, timeout)
+
+
+def review_correction(
+    source_text: str,
+    candidate_text: str,
+    *,
+    model: str,
+    url: str,
+    timeout: float,
+    num_ctx: int,
+    num_predict: int,
+    think: bool,
+) -> str:
+    payload = build_review_payload(
+        source_text,
+        candidate_text,
+        model,
+        num_ctx,
+        num_predict,
+        think=think,
+    )
+    return run_ollama_payload(payload, url, timeout)
 
 
 def parse_args() -> argparse.Namespace:
@@ -550,6 +723,25 @@ def parse_args() -> argparse.Namespace:
         "--input-file",
         help="Read source text from a UTF-8 file instead of stdin.",
     )
+    parser.add_argument(
+        "--think",
+        choices=("auto", "on", "off"),
+        default=normalize_think_setting(os.environ.get("AI_CORRECTOR_THINK")),
+        help="Use Ollama native thinking when supported. Default: auto",
+    )
+    parser.add_argument(
+        "--review",
+        dest="review",
+        action="store_true",
+        default=parse_bool(os.environ.get("AI_CORRECTOR_REVIEW"), DEFAULT_REVIEW),
+        help="Run an extra review pass after model correction. Default: on",
+    )
+    parser.add_argument(
+        "--no-review",
+        dest="review",
+        action="store_false",
+        help="Disable the extra review pass.",
+    )
     return parser.parse_args()
 
 
@@ -585,6 +777,8 @@ def main() -> int:
         print(fixed, end="")
         return 0
 
+    think = resolve_think(args.model, args.think)
+
     try:
         corrected = call_ollama(
             source_text,
@@ -593,6 +787,7 @@ def main() -> int:
             timeout=args.timeout,
             num_ctx=args.num_ctx,
             num_predict=args.num_predict,
+            think=think,
         )
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
@@ -600,6 +795,23 @@ def main() -> int:
 
     if not correction_is_safe(source_text, corrected):
         corrected = source_text
+    elif args.review and corrected.strip() != source_text.strip():
+        try:
+            reviewed = review_correction(
+                source_text,
+                corrected,
+                model=args.model,
+                url=args.url,
+                timeout=args.timeout,
+                num_ctx=args.num_ctx,
+                num_predict=args.num_predict,
+                think=think,
+            )
+        except RuntimeError:
+            reviewed = corrected
+
+        if correction_is_safe(source_text, reviewed):
+            corrected = reviewed
 
     print(corrected, end="")
     return 0

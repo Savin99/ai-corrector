@@ -64,6 +64,24 @@ AI_CORRECTOR_MODEL=qwen3.5:4b-q4_K_M ./install.sh
 echo "текст" | AI_CORRECTOR_MODEL=qwen3.5:4b-q4_K_M ./corrector.py
 ```
 
+По умолчанию включён более тщательный режим:
+
+- для моделей с native thinking скрипт включает thinking автоматически;
+- для `gemma3:4b` скрипт делает дополнительный review-проход, потому что сама модель native thinking не поддерживает.
+
+Отключить review для скорости:
+
+```bash
+AI_CORRECTOR_REVIEW=0 ./corrector.py
+```
+
+Принудительно управлять native thinking:
+
+```bash
+AI_CORRECTOR_THINK=auto ./corrector.py
+AI_CORRECTOR_THINK=off ./corrector.py
+```
+
 ## Что делает корректор
 
 - исправляет орфографию, пунктуацию и грамматику;
