@@ -147,7 +147,7 @@ local function newTask(inputPath, clipboardBefore)
   return task
 end
 
-local function runCorrection(inputPath, clipboardBefore)
+local function runCorrection(inputPath, clipboardBefore, selectedText)
   local command = table.concat({
     shellQuote(defaultConfig.pythonPath),
     shellQuote(defaultConfig.scriptPath),
@@ -176,8 +176,15 @@ local function runCorrection(inputPath, clipboardBefore)
       .. trim(output)
     )
 
-    if status and trim(output) ~= "" then
-      hs.pasteboard.setContents(trim(output))
+    local correctedText = trim(output)
+    if status and correctedText ~= "" then
+      if correctedText == trim(selectedText) then
+        restoreClipboard(clipboardBefore)
+        hs.alert.show("Без изменений")
+        return
+      end
+
+      hs.pasteboard.setContents(correctedText)
 
       hs.timer.doAfter(0.05, function()
         hs.eventtap.keyStroke({"cmd"}, "v", 0)
@@ -234,7 +241,7 @@ local function correctSelectedText()
       return
     end
 
-    runCorrection(inputPath, clipboardBefore)
+    runCorrection(inputPath, clipboardBefore, selectedText)
   end)
 end
 

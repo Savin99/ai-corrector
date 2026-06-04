@@ -28,6 +28,16 @@ class CorrectorSafetyTest(unittest.TestCase):
             "В общем, их отчёт лучше выглядит.",
         )
 
+    def test_local_text_fixes_work_tech_phrase(self):
+        self.assertEqual(
+            corrector.local_text_fix(
+                "привет я гугл восстановили доступ к гугл клауд "
+                "илил вотстанавливай иди впн"
+            ),
+            "Привет, Google восстановил доступ к Google Cloud. "
+            "Или восстанавливай через VPN.",
+        )
+
     def test_rejects_rephrased_inflections(self):
         self.assertFalse(
             corrector.correction_is_safe(

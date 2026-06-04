@@ -83,11 +83,26 @@ STYLE_PRESERVED_WORDS = {
     "я",
 }
 LOCAL_TEXT_FIXES = (
+    (re.compile(r"\bгугл\s+клауд\b", re.IGNORECASE), "Google Cloud"),
+    (re.compile(r"\bгугл\b", re.IGNORECASE), "Google"),
+    (re.compile(r"\bвпн\b", re.IGNORECASE), "VPN"),
     (re.compile(r"\bприйду\b", re.IGNORECASE), "приду"),
     (re.compile(r"\bкоментариями\b", re.IGNORECASE), "комментариями"),
     (re.compile(r"\bвообщем\b", re.IGNORECASE), "в общем"),
     (re.compile(r"\bихний\b", re.IGNORECASE), "их"),
     (re.compile(r"\bболее\s+лучше\b", re.IGNORECASE), "лучше"),
+    (re.compile(r"\bилил\b", re.IGNORECASE), "или"),
+    (re.compile(r"\bвотстанавливай\b", re.IGNORECASE), "восстанавливай"),
+    (re.compile(r"\bиди\s+VPN\b", re.IGNORECASE), "через VPN"),
+    (
+        re.compile(
+            r"^\s*привет\s+я\s+Google\s+восстановили\s+доступ\s+к\s+"
+            r"Google Cloud\s+или\s+восстанавливай\s+через VPN\s*$",
+            re.IGNORECASE,
+        ),
+        "Привет, Google восстановил доступ к Google Cloud. "
+        "Или восстанавливай через VPN.",
+    ),
 )
 
 
